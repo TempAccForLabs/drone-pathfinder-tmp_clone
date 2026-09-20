@@ -1,28 +1,47 @@
 // define variables
 
+// define the grid dimensions of |S| = (i,j) with rows, columns;
+// define the semantic type of any state with a string label: "empty", "start", "goal", "obstacle", "path";
 let rows, columns, board = [];
+
+// define deliveryReward as a fixed-value reward for a goal state, i.e. absorbing state immutable value reward;
+// define powerCost as the negative reward: transitionary immediate, for any transition from non-terminal state;
+// define repairCost as a negative reward: immutable; repair == rival == obstacle;
+// define discount factor (gamma) by denoting how much agent values future rewards relative to immediate;
 let deliveryReward, powerCost, repairCost, discount;
+
+// define contrast as parameter for visualization normalization exponent;
+// define directions as an action space, A, cardinality (4, maybe 8 with grater resolution);
 let contrast, directions, values = [];
+
+// define (i,j) pairs of start and goal node;
+// define in an array all pairs (i,j) representing obstacles;
 let startNode, goalNode, rivals = [];
+
 let isMouseDown, mode, gradientActive = false, lastCompressedValues = [];
 
+// event listeners to grid dimensions changes;
 document.getElementById("rows").addEventListener("input", update);
 document.getElementById("columns").addEventListener("input", update);
 
 
 function setup() {
+    // call update to read all input fields into the global variables;
     update();
     board[1][1] = "start";
     startNode = [1,1]; // we put a start node
     board[rows - 2][columns - 2] = "goal";
     goalNode = [rows - 2][columns - 2]; // we put an end node
     createBoard(); // we generate the board
+
+    // disable the gradient button until a path has been computed;
     let gradient = document.getElementById("toggleGradient");
     gradient.disabled = true;
 }
 
 window.onload = setup;
 
+/* Reads in scalar HTML param inputs and regenerates grid */
 function update() {
     rows = parseInt(document.getElementById("rows").value);
     columns = parseInt(document.getElementById("columns").value);
@@ -48,6 +67,7 @@ function setupEvents(cell) {
     })
 }
 
+/* Linear search brute force O(|S|) to locate start/goal node in board array, where |S| is node number */
 function indexElement(arr, target) { // used for searching for start/goal nodes
     for (let i = 0; i < arr.length; i++) {
         for (let j = 0; j < arr[i].length; j++) {
@@ -62,9 +82,14 @@ function createBoard() {
 
     const gridContainer = document.querySelector(".grid-container");
     gridContainer.replaceChildren();
+
+    // store previous state labels
     const oldBoard = board;
+
+    // fill with state label "empty", a state-reset rows x columns matrix
     board = new Array(rows).fill(0).map(() => new Array(columns).fill("empty"));
 
+    // create a new div element for each (i,j)
     for (let i = 0; i < rows; i++) {
         const row = document.createElement("div");
         row.classList.add("row"); // creating a div with class "row"
@@ -76,6 +101,7 @@ function createBoard() {
 
             setupEvents(cell);
 
+            // copy over a label from oldBoard if it existed
             if (oldBoard[i] && oldBoard[i][j]) {
                 cell.classList.add(oldBoard[i][j]);
                 board[i][j] = oldBoard[i][j]; // we preserve the existing cell color if it is available
@@ -157,30 +183,369 @@ function togglePath() {
     }
 }
 
+//!!!
+/**
+ * Applies Anderson Acceleration to speed up fixed-point iterations (like Value Iteration).
+ * Pure JS standalone method.
+ *
+ * @param {Array} vHistory - Array of previous 2D value matrices V_k
+ * @param {Array} fHistory - Array of previous 2D Bellman updates F(V_k)
+ * @param {number} rows - Number of rows in the grid
+ * @param {number} cols - Number of columns in the grid
+ * @returns {Array} - The accelerated 2D value matrix for the next iteration
+ */
+function applyAndersonAcceleration(vHistory, fHistory, rows, cols) {
+
+    // m = |{V}| i.e. the cardinality of the history of past iterations
+    const m = vHistory.length;
+    if (m === 0) return []; // empty set
+    if (m === 1) return fHistory[0]; // F(V_1): Not enough history, fall back to standard Bellman update; F(V_k) is
+    // notation for Bellman update at iteration k;
+    // Explanation: Anderson acceleration requires at least 2 pts to draw a line; for 1 data pt, we default to standard iteration.
+
+
+    // Helper: Flatten 2D matrix to 1D vector
+    // Vectorization operator vec: R^{rows * cols} -> R^N
+    const flatten = (matrix) => matrix.flat();
+
+    // Helper: Unflatten 1D vector back to 2D matrix
+    // vec^{-1}: R^N -> R^{rows * cols}
+    const unflatten = (vector) => {
+        let matrix = [];
+        for (let i = 0; i < rows; i++) {
+            matrix.push(vector.slice(i * cols, (i + 1) * cols));
+        }
+        return matrix;
+    };
+
+    // Helper: Dot product
+    // <a,b> = a^T * b = sum_{k=1}^N {a_k * b_k}
+    const dot = (a, b) => a.reduce((sum, val, i) => sum + val * b[i], 0);
+
+    // 1. Flatten matrices and calculate residuals: R_k = F(V_k) - V_k
+    // Any residual is counted as: R_k = F(V_k) - V_k;
+    // R is initialized as an empty set to hold residual vectors from the calculation given here;
+    // F is initialized as an empty set to hold the (flattened) Bellman vector updates - explained below
+    let R = [];
+    let F = [];
+    for (let i = 0; i < m; i++) {
+        // we vectorize (flatten) the 2D Bellman update matrix into a 1D vector
+        // f_i = vec(F(V_i));
+        let f_flat = flatten(fHistory[i]);
+        // we vectorize (flatten) the 2D value matrix into 1D vectors
+        // v_i = vec(V_i);
+        let v_flat = flatten(vHistory[i]);
+        // F <- F U {f_i}
+        // we store the (flattened) Bellman vector in set F
+        F.push(f_flat);
+        // residual vector: r_i = f_i - v_i;
+        // we define the residual vector r_i as the element wise error between Bellman vector update and prev values
+        // R <- R U {r_i}
+        let r_flat = f_flat.map((val, idx) => val - v_flat[idx]);
+        R.push(r_flat);
+    }
+
+    // 2. Build the normal equations matrix A for the least squares problem;
+    // Minimizing || sum(alpha_i * R_i) || subject to sum(alpha_i) = 1;
+    // We use a Lagrange multiplier, creating an (m+1) x (m+1) system;
+    // Explanation: we initialize a square matrix A with zeros and a vector b as well:
+    // A is an element of R^{(m+1) * (m+1)}; R here is the real numbers set
+    // the size here is m+1 because we have m historical points
+    // plus 1 row/ column for the Lagrange multiplier constraint;
+    // Vector b is an element of R^(m+1), R here being the real number set again
+    let A = Array.from({ length: m + 1 }, () => Array(m + 1).fill(0));
+    let B = Array(m + 1).fill(0);
+
+    // Gram matrix creation explanation:
+    // we populate top left m * m size (out of total (m+1)(m+1) size matrix)
+    // by taking the dot products of every residual (flattened) vector with every other one, mathematically:
+    // for every i,j in {1,...,m} we calculate A_{i,j} = r_i^T * r_j;
+    // we also append a unit 1 value to every final column element of every row i, and also 1 to every final row element of every column i;
+    // In calculus, this arises directly from taking the partial derivative of the Lagrange multiplier lambda;
+    // mathematically for i in {1,...,m} we calculate A_{i,m+1} = 1 and A_{m+1,i} = 1.
+    for (let i = 0; i < m; i++) {
+        for (let j = 0; j < m; j++) {
+            A[i][j] = dot(R[i], R[j]);
+        }
+        A[i][m] = 1; // Lagrange multiplier row
+        A[m][i] = 1; // Lagrange multiplier col
+    }
+    // B_{m+1} = 1; we set the final element of the vector b to 1
+    B[m] = 1; // The constraint: sum(alpha) = 1
+
+    // 3. Solve the linear system A * x = b for vector x
+    // Explanation: the solution vector x in R^{m+1} will take the form
+    // x = [alpha_1, alpha_2, alpha_3, ..., alpha_m, lambda]^T
+    // giving us the optimal weights
+
+    let X = solveGaussianElimination(A, B);
+
+    // If det(A) is approx 0, return {vec}^{-1}(f_m)
+    // The system may be singular or nearly singular when the residual vectors r_1, ..., r_m are linearly dependent or
+    // nearly dependent. In that case, the coefficients are not uniquely or stably determined, so the solver
+    // returns failure and the caller falls back to the latest Bellman update.
+    if (!X) return unflatten(F[m - 1]);
+
+    // alpha = [x_1, x_2, ..., x_m]^T
+    // Explanation: We discard the Lagrange multiplier lambda (which is x_{m+1}) because it served its purpose during the
+    // matrix solve. We keep only the m calculated weights.
+    const alphas = X.slice(0, m);
+
+    // 4. Finally, the core Anderson acceleration step:
+    // we compute the accelerated vector: V_accel = sum(alpha_i * F_i)
+
+    // We first initialize an empty 1D vector to hold our final accelerated values
+    // Let v_{accel} in R^N, v_{accel} = 0; R here is set of real numbers
+    let v_accel_flat = Array(rows * cols).fill(0);
+
+    // Mathematically, v_{accel} = sum_{i=1}^m alpha_i * f_i
+    for (let i = 0; i < m; i++) {
+        for (let j = 0; j < v_accel_flat.length; j++) {
+            // We scale each historical Bellman update vector (f_i) by its corresponding optimal weight alpha_i
+            // and sum them all together to create the new accelerated 1D vector.
+            v_accel_flat[j] += alphas[i] * F[i][j];
+        }
+    }
+
+    return unflatten(v_accel_flat);
+}
+
+// !!!
+/**
+ * Standard Gaussian elimination with partial pivoting.
+ * Used internally by the Anderson Accelerator to solve the m x m linear system.
+ */
+function solveGaussianElimination(A, B) {
+    let n = B.length;
+    let M = A.map((row, i) => [...row, B[i]]); // Augmented matrix
+
+    for (let i = 0; i < n; i++) {
+        // Find pivot
+        let maxRow = i;
+        for (let k = i + 1; k < n; k++) {
+            if (Math.abs(M[k][i]) > Math.abs(M[maxRow][i])) {
+                maxRow = k;
+            }
+        }
+        // Swap rows
+        [M[i], M[maxRow]] = [M[maxRow], M[i]];
+
+        // Check for singular matrix (near-zero pivot)
+        if (Math.abs(M[i][i]) < 1e-10) return null;
+
+        // Eliminate
+        for (let k = i + 1; k < n; k++) {
+            let c = -M[k][i] / M[i][i];
+            for (let j = i; j <= n; j++) {
+                if (i === j) M[k][j] = 0;
+                else M[k][j] += c * M[i][j];
+            }
+        }
+    }
+
+    // Back substitution
+    let X = Array(n).fill(0);
+    for (let i = n - 1; i >= 0; i--) {
+        X[i] = M[i][n] / M[i][i];
+        for (let k = i - 1; k >= 0; k--) {
+            M[k][n] -= M[k][i] * X[i];
+        }
+    }
+    return X;
+}
+
+// !!!
+/**
+ * Computes the Log-Sum-Exp of an array of Q-values to prevent floating-point overflow/underflow.
+ *
+ * @param {number[]} qValues - Array of Q-values for available actions at state s.
+ * @param {number} tau - Temperature hyperparameter (tau > 0). Smaller tau approaches hard max.
+ * @returns {number} Soft max value for state s.
+ */
+function logSumExpQValues(qValues, tau = 0.1) {
+    if (!qValues || qValues.length === 0) return 0;
+
+    // Find maximum Q-value for numerical stability (Log-Sum-Exp trick)
+    const qMax = Math.max(...qValues);
+
+    let sumExp = 0;
+    for (let i = 0; i < qValues.length; i++) {
+        sumExp += Math.exp((qValues[i] - qMax) / tau);
+    }
+
+    return qMax + tau * Math.log(sumExp);
+}
+
+// !!!
+/**
+ * Calculates the Soft Bellman state update across all available actions.
+ * Drop-in alternative to hard-max calculateNextMoves.
+ *
+ * @param {number[]} qValues - Array of Q-values for each action.
+ * @param {boolean} useSoftBellman - Toggle between hard Bellman and Soft Bellman.
+ * @param {number} tau - Temperature parameter for Soft Bellman.
+ * @returns {number} New state value V(s).
+ */
+function computeSoftBellmanUpdate(qValues, useSoftBellman = true, tau = 0.15) {
+    if (!useSoftBellman) {
+        // Standard Hard Bellman Optimality Operator: V(s) = max_a Q(s, a)
+        return Math.max(...qValues);
+    }
+
+    // Soft Bellman Optimality Operator: V_soft(s) = tau * log(sum(exp(Q(s,a) / tau)))
+    return logSumExpQValues(qValues, tau);
+}
+
+/* The core solver is given in the planPath and computePolicies functions */
 function planPath() {
 
+    // define policies matrix pi_k(s) initialized to 0 ("no action assigned")
     let policies = Array.from({ length: rows }, () => Array(columns).fill(0)); // initialize each policy cell to no moves yet
+    // define for each cell s, value function V_k(s), initialized to 0
     values   = Array.from({ length: rows }, () => Array(columns).fill(0)); // initialize each value cell to starting utility
-
-    computePolicies(values, policies);
+    // Perform the value iteration algorithm.
+    // We must assign the result of computePolicies back to the global 'values' variables.
+    // Global reference must be updated here, because the Anderson acceleration creates a new array instead of modifying the old one
+    values = computePolicies(values, policies);
+    // extract the trajectory
     showPath(policies);
+}
+
+/**
+ * Performs a full sweep of the grid to compute the Bellman update F(V). This creates a new matrix based on the current
+ * values without modifying the original matrix, which is a requirement for Anderson Acceleration.
+ *
+ * @param {Array} currentValues - The current value function matrix V_k.
+ * @returns {Array} - The resulting value function matrix after one Bellman update F(V_k).
+ */
+function performBellmanSweep(currentValues) {
+    // Initialize a new matrix to store the results of the update (F(V))
+    let nextValues = Array.from({ length: rows }, () => Array(columns).fill(0));
+
+    // 1. Fixed values for absorbing states:
+    // The goal state must maintain its delivery reward in the new matrix.
+    nextValues[goalNode[0]][goalNode[1]] = deliveryReward;
+
+    // Obstacles must maintain their negative repair cost in the new matrix.
+    for (let r of rivals) {
+        nextValues[r[0]][r[1]] = -repairCost;
+    }
+
+    // 2. Compute the Bellman update for all non-terminal states:
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < columns; j++) {
+            let currPosn = [i, j];
+
+            // Only calculate updates for states that are NOT the goal and NOT obstacles.
+            if ((currPosn[0] !== goalNode[0] || currPosn[1] !== goalNode[1]) &&
+                !rivals.some((pos) => currPosn[0] === pos[0] && currPosn[1] === pos[1])) {
+
+                // We call calculateNextMoves with updateInPlace = false.
+                // This uses the math logic to find the new value but DOES NOT modify the current values matrix.
+                // We pass an empty array for policies as we only need the value for the snapshot.
+                nextValues[i][j] = calculateNextMoves(currPosn, currentValues, [], false);
+            }
+        }
+    }
+
+    return nextValues;
 }
 
 function computePolicies(values, policies) {
 
+    mapHazardPositions();
+
+    values[goalNode[0]][goalNode[1]] = deliveryReward;
+
+    for (let r of rivals) {
+        let i = r[0], j = r[1];
+        values[i][j] = -repairCost;
+    }
+
+    // Anderson Acceleration setup
+    let vHistory = []; // Stores V_k snapshots
+    let fHistory = []; // Stores F(V_k) snapshots
+    const m = 5;       // History window size
+
+    while (true) {
+        // Store snapshot for convergence check and history
+        let prev = copyValues(values);
+
+        // Use performBellmanSweep instead of in-place loop:
+        // this generates F(V) without modifying the current values matrix
+        let nextValues = performBellmanSweep(values);
+
+        // Manage Anderson histories
+        vHistory.push(prev);
+        fHistory.push(nextValues);
+
+        if (vHistory.length > m) {
+            vHistory.shift();
+            fHistory.shift();
+        }
+
+        // Update the value function using Anderson Acceleration
+        values = applyAndersonAcceleration(vHistory, fHistory, rows, columns);
+
+        // Comparing accelerated values
+        if (converges(prev, values)) {
+            break;
+        }
+    }
+
+    // Since Anderson Acceleration only converges the values, we run one final pass to populate the policies matrix and
+    // ensure values are consistent.
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < columns; j++) {
+            let currPosn = [i, j];
+            if ((currPosn[0] !== goalNode[0] || currPosn[1] !== goalNode[1]) && !rivals.some((pos) => currPosn[0] === pos[0] && currPosn[1] === pos[1])) {
+                // Use updateInPlace = true to save the deterministic policy
+                calculateNextMoves(currPosn, values, policies, true);
+            }
+        }
+    }
+
+    // Return the entire converged matrix, not just the scalar value of the start node.
+    // The original Value Iteration implementation relied on in-place mutation of the global values matrix (in
+    // calculateNextMoves), ensuring that the memory reference used by the visualization remained constant while the
+    // data within it updated. In contrast, Anderson Acceleration requires the creation of new matrices to store
+    // snapshots for its fixed-point iteration logic. This results in the solver returning a new array reference
+    // rather than modifying the existing one. Consequently, the global values variable used by the gradient function
+    // remained pointed at the initial zero-initialized matrix, resulting in a monochrome display.
+    // To resolve this, computePolicies was modified to return the final converged matrix instead of a scalar value.
+    // In planPath, the global values reference is now explicitly updated with the return value of the solver.
+    // This ensures that the normalization and quantization processes in the gradient visualization access the updated
+    // utility values, restoring the grayscale transition across the state space.
+    return values;
+}
+
+/* Deprecated */
+function computePoliciesPreAccel(values, policies) {
+
+    // creates a deep copy of the init "values" matrix V(s), where any s is a (i,j) node
     let prev = copyValues(values); // getting a copy to track changes from convergence
     mapHazardPositions();
+
+    // V(s_goal) <-- R_goal == deliveryReward;
+    // goal is treated as an absorbing state with fixed value
     values[goalNode[0]][goalNode[1]] = deliveryReward; // set the utility of the goal cell to the delivery reward
 
     for (let r of rivals) {
         let i = r[0], j = r[1];
+
+        // -R_repair = -repairCost for all s in S_obstacles;
+        // obstacles are absorbing terminal states with fixed negative value
         values[i][j] = -repairCost; // set the utility of each obstacle to the negative repair cost
     }
 
+    // this is the Bellman optimality operator iterative application
     while (true) { // loop until the value function converges (values stop changing significantly)
         for (let i = 0; i < rows; i++) {
             for (let j = 0; j < columns; j++) {
                 let currPosn = [i, j]; // possible error here
+
+                // this condition ensures that the Bellman update is only applied to non-terminal states: skipping end goal and all obstacles/rivals;
+                // S_absorbing === S_goal + S_obstacle
                 if ((currPosn[0] !== goalNode[0] || currPosn[1] !== goalNode[1]) && !rivals.some((pos) => currPosn[0] === pos[0] && currPosn[1] === pos[1])) {
                     calculateNextMoves(currPosn, values, policies); // calculate the best move, and update utility for cell
                 }
@@ -207,19 +572,36 @@ function converges(prev, curr, converge_factor = 0.01) {
     return true; // if all the differences are within the threshold, they converged
 }
 
-function calculateNextMoves(currPosn, values, policies) {
+// !!!
+/* Implementation of the Bellman optimality update for a single state s=(i,j) */
+// Added 'updateInPlace' parameter (defaulting to true) to allow the function to be used for snapshotting in
+// Anderson Acceleration without modifying the source matrix.
+/* The original calculateNextMoves updates the values matrix in-place (values[currPosn[0]][currPosn[1]] = new_val).
+ Anderson Acceleration mathematically requires a "Jacobi" update—meaning we calculate all the new values
+ for the whole board based on the old values before updating anything. If we update in-place, the acceleration fails.
+ To fix this without duplicating your code, we only need to make one change to the existing calculateNextMoves to
+ make it flexible, and then update computePolicies. The non-redundant minimal way to do this is given here. */
+function calculateNextMoves(currPosn, values, policies, updateInPlace = true) {
 
     // assume all neighboring positions are in range
+    // immediately set, then reset if needed
     let s_range = true;
     let w_range = true;
     let n_range = true;
     let e_range = true;
 
-    // checking if moving would go out of bounds
+    // checking if moving would go out of bounds;
+    // the boolean flags determine if the successor states in the cardinal directions lie within the grid;
+    // defining the deterministic successor function succ(s,a) for only 4 cardinal directions first (if cardinality of action space is 4);
+    // if the move is illegal, succ(s,a) = s
 
+    // down/south
     if (currPosn[0] + 1 > rows - 1) s_range = false;
+    // left/west
     if (currPosn[1] - 1 < 0) w_range = false;
+    // up/north
     if (currPosn[0] - 1 < 0) n_range = false;
+    // right/east
     if (currPosn[1] + 1 > columns - 1) e_range = false;
 
     let s_posn;
@@ -233,17 +615,23 @@ function calculateNextMoves(currPosn, values, policies) {
 
     // determining actual neighboring positions, if out of bounds, stay in place
 
+    // move south
     if (s_range) s_posn = [currPosn[0] + 1, currPosn[1]];
     else s_posn = currPosn;
 
+    // move west
     if (w_range) w_posn = [currPosn[0], currPosn[1] - 1];
     else w_posn = currPosn;
 
+    // move north
     if (n_range) n_posn = [currPosn[0] - 1, currPosn[1]];
     else n_posn = currPosn;
 
+    // move east
     if (e_range) e_posn = [currPosn[0], currPosn[1] + 1];
     else e_posn = currPosn;
+
+    // analogous for diagonals, if enabled
 
     if (s_range && w_range) sw_posn = [currPosn[0] + 1, currPosn[1] - 1];
     else sw_posn = currPosn;
@@ -257,8 +645,10 @@ function calculateNextMoves(currPosn, values, policies) {
     if (n_range && e_range) ne_posn = [currPosn[0] - 1, currPosn[1] + 1];
     else ne_posn = currPosn;
 
-    // calculate the utility at all neighboring positions
-    // direction_probability * (-1 * powerCost + (discount * values[next[y]][next[x]]))
+    // The code computes expected utility Q(s,a): sum of all possible successor states weighted by transition probabilities
+    // calculate the utility at all neighboring positions;
+    // direction_probability * (-1 * powerCost + (discount * values[next[y]][next[x]]));
+    // next === 2 adjacent to current direction
 
     let s =
         0.7 * (-1 * powerCost + discount * values[s_posn[0]][s_posn[1]]) +
@@ -281,6 +671,7 @@ function calculateNextMoves(currPosn, values, policies) {
         0.15 * (-1 * powerCost + discount * values[s_posn[0]][s_posn[1]]);
 
     // diagonal directions
+    // The same perpendicular-slip logic applies: the 2 directions at 90 to the intended diagonal receive lower probability each
 
     let sw =
         0.7 * (-1 * powerCost + discount * values[sw_posn[0]][sw_posn[1]]) +
@@ -302,26 +693,67 @@ function calculateNextMoves(currPosn, values, policies) {
         0.15 * (-1 * powerCost + discount * values[nw_posn[0]][nw_posn[1]]) +
         0.15 * (-1 * powerCost + discount * values[se_posn[0]][se_posn[1]]);
 
+    // Select the max and store the argmax;
+    // V_new(s) = max{Q(s, E), Q(s, N), Q(s, W), Q(s, S)};
+    // pi(s) = max{Q(s, E), Q(s, N), Q(s, W), Q(s, S)};
+    // policy is encoded as 1=East; 2=North; 3=West; 4=South;
     if (directions === 4) {
         let moves = [e, n, w, s]; // add all possible 4 moves to a list
-        let max_val = Math.max(...moves);
-        let max_move = moves.indexOf(max_val); // find the direction with the maximum utility
+
+        // Here's the trick: we want to apply the Soft Bellman operator to update the Value landscape
+        // (which makes the gradient smoother and helps convergence), but we still want to extract the strict highest
+        // Q-value to define the deterministic Policy so your showPath visualizer doesn't break.
+        // Soft update for the value landscape (calculating V_new(s))
+        let new_val = computeSoftBellmanUpdate(moves, true, 0.15);
+
+        // Hard argmax for the deterministic policy trajectory visualization
+        let best_q = Math.max(...moves);
+        let max_move = moves.indexOf(best_q);
 
         // update value & policies matrices
-        values[currPosn[0]][currPosn[1]] = max_val; // assign max utility to current cell
-        policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best move
+        // values[currPosn[0]][currPosn[1]] = new_val; // assign soft utility to current cell
+        // policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best deterministic move
+
+        // Wrapped update in 'if (updateInPlace)' block.
+        // This prevents modifying the 'values' matrix when we only need to compute a result for a snapshot.
+        if (updateInPlace) {
+            values[currPosn[0]][currPosn[1]] = new_val; // assign soft utility to current cell
+            policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best deterministic move
+        }
+
+        // Return new_val so the calling function can collect values into a new matrix.
+        return new_val;
+
     }
+    // Here the encoding is: 1=E, 2=N, 3=W, 4=S, 5=SW, 6=SE,7=NW, 8=NE
     else if (directions === 8) {
         let moves = [e, n, w, s, sw, se, nw, ne];
-        let max_val = Math.max(...moves);
-        let max_move = moves.indexOf(max_val);
+
+        // Soft update for the value landscape (calculating V_new(s))
+        let new_val = computeSoftBellmanUpdate(moves, true, 0.15);
+
+        // Hard argmax for the deterministic policy trajectory visualization
+        let best_q = Math.max(...moves);
+        let max_move = moves.indexOf(best_q);
 
         // update value & policies matrices
-        values[currPosn[0]][currPosn[1]] = max_val; // assign max utility to current cell
-        policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best move
+        // values[currPosn[0]][currPosn[1]] = new_val; // assign soft utility to current cell
+        // policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best deterministic move
+
+        // Wrapped update in 'if (updateInPlace)' block.
+        // This prevents modifying the 'values' matrix when we only need to compute a result for a snapshot.
+        if (updateInPlace) {
+            values[currPosn[0]][currPosn[1]] = new_val; // assign soft utility to current cell
+            policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best deterministic move
+        }
+
+        // Return new_val so the calling function can collect values into a new matrix.
+        return new_val;
     }
 }
 
+/* Scan the entire state space S and classify each cell: reconstruct the sets {s_start}, {s_goal}, S_obs from the
+current board configuration. The user may have moved start/ goal or added obstacles since the last computation. */
 function mapHazardPositions() {
     rivals = [];
     // startNode = null; goalNode = null;
@@ -340,6 +772,8 @@ function mapHazardPositions() {
     }
 }
 
+/* UI state locking: when the path is generated, parameters are locked to prevent the user from changing mdp definition
+while the solution is being displayed, ensuring consistency between policy being displayed and the parameters that generated it */
 function toggleButtons() {
     const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "four-directions", "eight-directions", "toggleGradient"];
     ids.forEach(id => { // disabling/enabling buttons depending on if 
@@ -351,15 +785,23 @@ function toggleButtons() {
     selectMode(""); // un-selecting the last selected mode after generating a path
 }
 
-
+/* This is a policy rollout, i.e. a trajectory simulation. Starting from s = s_start , the sequence is generated by:
+* s_{t+1} = succ(s_t, π(s_t));
+* Loop terminates when: policy at the current state is 0 (which occurs at the goal and obstacles, what with them being
+* fixed), or once a safety counter "steps" exceeds rows * columns, preventing infinite loops if the policy contains a
+* cycle. Note that this traces the intended path under the optimal policy, not a stochastic sample. It visualizes the
+* deterministic plan that the agent intends to follow, even though the actual execution in the stochastic environment
+* would deviate with some probability.
+* */
 function showPath(policies) {
-
+    // clear the previous path visualization
     const gridContainer = document.querySelector(".grid-container");
 
     for (let i = 0; i < rows; i++) {
         for (let j = 0; j < columns; j++) {
             if (board[i][j] === "path") {
                 board[i][j] = "empty";  // clear all existing paths
+                // remove CSS class
                 const oldCell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
                 if (oldCell) oldCell.classList.remove("path");
             }
@@ -426,16 +868,24 @@ function compressMatrixTo255(matrix) { // linear compression algorithm for turni
 
     return matrix.map(row =>
         row.map(value => {
-            // normalize 0–1
+            // normalize 0–1;
+            // apply a min max affine transformation that collapses the dynamic range of the value function
+            // into the unit interval
             let norm = (value - min) / (max - min);
+            // gamma correction power law contrast: the greater the coefficient the more emphasized the difference,
+            // and vice versa for values under 1.
             // apply contrast custom, so it can work nice with big boards and small ones :D
             norm = Math.pow(norm, contrast);
+            // quantize: scale to 8 bit grayscale
             // scale to 0–255
             return Math.round(norm * 255);
         })
     );
 }
 
+/* The gradient toggle overlays the value function onto the grid. High-utility states (close to the goal) appear bright,
+*  while low-utility states (near obstacles or far from the goal) appear dark. This provides an intuitive heatmap of the
+*  "desirability" of each state under the optimal policy. */
 function toggleGradient() {
 
     const btn_togglePath = document.getElementById("togglePath");
@@ -489,6 +939,7 @@ function clearBoard() {
     setup();   // update UI
 }
 
+/* Deep independent copy of the value function matrix V_k(s); used to save the state before a sweep (prev) for a convergence test */
 function copyValues(values){
     let new_values = [];
     for (let i = 0; i < rows; i++) {

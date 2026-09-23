@@ -528,7 +528,7 @@ function computePolicies(values, policies) {
     return values;
 }
 
-/* Deprecated */
+/* Adapted classic approach */
 function computePoliciesPreAccel(values, policies) {
 
     // creates a deep copy of the init "values" matrix V(s), where any s is a (i,j) node
@@ -556,7 +556,9 @@ function computePoliciesPreAccel(values, policies) {
                 // this condition ensures that the Bellman update is only applied to non-terminal states: skipping end goal and all obstacles/rivals;
                 // S_absorbing === S_goal + S_obstacle
                 if ((currPosn[0] !== goalNode[0] || currPosn[1] !== goalNode[1]) && !rivals.some((pos) => currPosn[0] === pos[0] && currPosn[1] === pos[1])) {
-                    calculateNextMoves(currPosn, values, policies); // calculate the best move, and update utility for cell
+                    calculateNextMoves(currPosn, values, policies, true);// true for updateInPlaceAddedParameter
+                    // implementation without added param is deprecated
+                    //calculateNextMoves(currPosn, values, policies); // calculate the best move, and update utility for cell
                 }
             }
         }
@@ -566,7 +568,10 @@ function computePoliciesPreAccel(values, policies) {
             prev = copyValues(values); // continue looping and keep track of previous values nxn matrix
         }
     }
-    return values[startNode[0]][startNode[1]]; // returns utility values at the start position
+    //Returns the full matrix instead of a single number, preventing the global values variable from being destroyed)
+    return values;
+    // implementation below is deprecated
+    //return values[startNode[0]][startNode[1]]; // returns utility values at the start position
 }
 
 

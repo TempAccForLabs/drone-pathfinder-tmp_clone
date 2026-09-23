@@ -35,14 +35,30 @@ $$\frac{\partial \mathcal{L}}{\partial \lambda} = \sum_{i=0}^{m-1} \alpha_i - 1 
 
 This yields the augmented system $A\mathbf{x} = \mathbf{b}$:
 
-$$\begin{bmatrix}
+$$\left[
+\begin{matrix}
 r_0^T r_0 & \dots & r_0^T r_{m-1} & 1 \\
 \vdots & \ddots & \vdots & \vdots \\
 r_{m-1}^T r_0 & \dots & r_{m-1}^T r_{m-1} & 1 \\
 1 & \dots & 1 & 0
-\end{bmatrix}
-\begin{bmatrix} \alpha_0 \\ \vdots \\ \alpha_{m-1} \\ \lambda \end{bmatrix} =
-\begin{bmatrix} 0 \\ \vdots \\ 0 \\ 1 \end{bmatrix}$$
+\end{matrix}
+\right]
+\left[
+\begin{matrix}
+\alpha_0 \\
+\vdots \\
+\alpha_{m-1} \\
+\lambda
+\end{matrix}
+\right] =
+\left[
+\begin{matrix}
+0 \\
+\vdots \\
+0 \\
+1
+\end{matrix}
+\right]$$
 
 The resulting coefficients $\alpha_i$ allow the solver to extrapolate the value function, effectively "leaping" toward the fixed point $V^*$ and reducing the number of required iterations by an order of magnitude.
 

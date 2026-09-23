@@ -50,7 +50,8 @@ function update() {
     repairCost = parseFloat(document.getElementById("repairCost").value);
     discount = parseFloat(document.getElementById("discount").value);
     contrast = parseInt(document.getElementById("contrast").value);
-    directions = parseInt(document.querySelector('input[name="directionMode"]:checked').value);
+    //directions = parseInt(document.querySelector('input[name="directionMode"]:checked').value);
+    directions = 8;
     createBoard();
 }
 
@@ -789,12 +790,17 @@ function mapHazardPositions() {
 /* UI state locking: when the path is generated, parameters are locked to prevent the user from changing mdp definition
 while the solution is being displayed, ensuring consistency between policy being displayed and the parameters that generated it */
 function toggleButtons() {
-    const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "four-directions", "eight-directions", "toggleGradient"];
-    ids.forEach(id => { // disabling/enabling buttons depending on if 
+    // REMOVED "four-directions" and "eight-directions" from this list
+    //const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "four-directions", "eight-directions", "toggleGradient"];
+    const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "toggleGradient"];
+    ids.forEach(id => { // disabling/enabling buttons depending on if
         const element = document.getElementById(id);
-        if (element) element.disabled = !element.disabled;
-        if (element.disabled && element.classList.contains("active"))
-            element.classList.remove("active");
+        if (element) {
+            element.disabled = !element.disabled;
+            if (element.disabled && element.classList.contains("active")) {
+                element.classList.remove("active");
+            }
+        }
     }    );
     selectMode(""); // un-selecting the last selected mode after generating a path
 }

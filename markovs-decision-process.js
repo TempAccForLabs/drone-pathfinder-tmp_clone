@@ -24,6 +24,87 @@ let isMouseDown, mode, gradientActive = false, lastCompressedValues = [];
 document.getElementById("rows").addEventListener("input", update);
 document.getElementById("columns").addEventListener("input", update);
 
+// =============================================================================
+// TRAJECTORY OPTIMIZATION MODULE (Gradient Descent Smoothing)
+// =============================================================================
+
+class PathOptimizer {
+    /**
+     * Smooths a discrete grid path using a Gradient Descent approach.
+     *
+     * This method is fully dynamic: it does not rely on hardcoded coordinates.
+     * It treats the first and last coordinates of the input path as the
+     * dynamic Start and Goal anchors, ensuring the smoothed trajectory
+     * always begins and ends exactly where the user placed the nodes.
+     *
+     * @param {Array} path - The discrete path produced by the solver [[r, c], [r, c]...].
+     * @param {Array} obstacles - The dynamic 'rivals' array [ [r, c]... ].
+     * @returns {Array} - A smoothed trajectory with floating-point coordinates.
+     */
+    static smoothPath(path, obstacles) {
+        // Safety check: If the path is too short or empty, smoothing is impossible/unnecessary.
+        if (!path || path.length < 3) return path;
+
+        // Hyperparameters for the Gradient Descent process
+        const iterations = 100;       // Number of refinement passes
+        const learningRate = 0.1;     // Step size for coordinate updates
+        const smoothnessWeight = 0.5; // Influence of the internal straightening force
+        const repulsionWeight = 2.0;  // Influence of the obstacle avoidance force
+        const repulsionRadius = 1.5;  // The distance threshold for obstacle repulsion
+
+        // Create a deep copy of the path.
+        // We map the discrete integers to floats to allow the points to move
+        // smoothly between cell centers (sub-pixel precision).
+        let smoothed = path.map(p => [parseFloat(p[0]), parseFloat(p[1])]);
+
+        for (let iter = 0; iter < iterations; iter++) {
+            // DYNAMIC ANCHORING:
+            // We loop from index 1 to length - 2.
+            // This explicitly 'pins' smoothed[0] (Dynamic Start) and
+            // smoothed[smoothed.length - 1] (Dynamic Goal), ensuring
+            // the trajectory never drifts away from the user-defined endpoints.
+            for (let i = 1; i < smoothed.length - 1; i++) {
+                let curr = smoothed[i];
+                let prev = smoothed[i - 1];
+                let next = smoothed[i + 1];
+
+                // --- 1. INTERNAL TENSION FORCE (Smoothing) ---
+                // This calculates the gradient toward the midpoint of the neighbors.
+                // It removes the "stair-step" blockiness of the grid.
+                let smoothForceR = (prev[0] + next[0]) / 2 - curr[0];
+                let smoothForceC = (prev[1] + next[1]) / 2 - curr[1];
+
+                // --- 2. EXTERNAL REPULSION FORCE (Obstacle Avoidance) ---
+                let repelForceR = 0;
+                let repelForceC = 0;
+
+                // Dynamically iterate through all obstacles currently on the board
+                for (let obs of obstacles) {
+                    let distR = curr[0] - obs[0];
+                    let distC = curr[1] - obs[1];
+                    let distanceSq = distR * distR + distC * distC;
+                    let distance = Math.sqrt(distanceSq);
+
+                    // Only apply force if the point is within the influence radius of the obstacle
+                    if (distance < repulsionRadius && distance > 0) {
+                        // Force magnitude is inversely proportional to distance (1/d^3)
+                        // This creates a "hard" push-back as the path gets closer to a wall.
+                        let strength = repulsionWeight / (distanceSq * distance);
+                        repelForceR += distR * strength;
+                        repelForceC += distC * strength;
+                    }
+                }
+
+                // --- 3. GRADIENT DESCENT UPDATE ---
+                // We update the coordinates by moving them in the direction of the combined forces.
+                curr[0] += learningRate * (smoothnessWeight * smoothForceR + repelForceR);
+                curr[1] += learningRate * (smoothnessWeight * smoothForceC + repelForceC);
+            }
+        }
+
+        return smoothed;
+    }
+}
 
 function setup() {
     // call update to read all input fields into the global variables;
@@ -779,25 +860,6 @@ function showSmoothedPath(policies) {
 
 }
 
-function renderGDPath(points, container) {
-    for (let i = 0; i < points.length - 1; i++) {
-        const p1 = points[i];
-        const p2 = points[i + 1];
-        // Interpolate between the two GD-optimized points to ensure no cells are skipped
-        for (let t = 0; t <= 1; t += 0.2) {
-            const r = Math.round(p1[0] + (p2[0] - p1[0]) * t);
-            const c = Math.round(p1[1] + (p2[1] - p1[1]) * t);
-            if (r >= 0 && r < rows && c >= 0 && c < columns) {
-                const cell = container.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
-                if (cell && !cell.classList.contains("obstacle") && !cell.classList.contains("start") && !cell.classList.contains("goal")) {
-                    board[r][c] = "path";
-                    cell.classList.add("path");
-                }
-            }
-        }
-    }
-}
-
 /* Path display without Gradient Descent.
 * This is a policy rollout, i.e. a trajectory simulation. Starting from s = s_start , the sequence is generated by:
 * s_{t+1} = succ(s_t, π(s_t));
@@ -1069,84 +1131,40 @@ function computeSoftBellmanUpdate(qValues, useSoftBellman, tau = 0.15) {
     return logSumExpQValues(qValues, tau);
 }
 
-// =============================================================================
-// TRAJECTORY OPTIMIZATION MODULE (Gradient Descent Smoothing)
-// =============================================================================
+function renderGDPath(points, container) {
+    let lastR = null;
+    let lastC = null;
 
-class PathOptimizer {
-    /**
-     * Smooths a discrete grid path using a Gradient Descent approach.
-     *
-     * This method is fully dynamic: it does not rely on hardcoded coordinates.
-     * It treats the first and last coordinates of the input path as the
-     * dynamic Start and Goal anchors, ensuring the smoothed trajectory
-     * always begins and ends exactly where the user placed the nodes.
-     *
-     * @param {Array} path - The discrete path produced by the solver [[r, c], [r, c]...].
-     * @param {Array} obstacles - The dynamic 'rivals' array [ [r, c]... ].
-     * @returns {Array} - A smoothed trajectory with floating-point coordinates.
-     */
-    static smoothPath(path, obstacles) {
-        // Safety check: If the path is too short or empty, smoothing is impossible/unnecessary.
-        if (!path || path.length < 3) return path;
+    for (let i = 0; i < points.length - 1; i++) {
+        // SNAP: Round the GD points to the grid first to prevent "drift" bloat
+        const r1 = Math.round(points[i][0]);
+        const c1 = Math.round(points[i][1]);
+        const r2 = Math.round(points[i + 1][0]);
+        const c2 = Math.round(points[i + 1][1]);
 
-        // Hyperparameters for the Gradient Descent process
-        const iterations = 100;       // Number of refinement passes
-        const learningRate = 0.1;     // Step size for coordinate updates
-        const smoothnessWeight = 0.5; // Influence of the internal straightening force
-        const repulsionWeight = 2.0;  // Influence of the obstacle avoidance force
-        const repulsionRadius = 1.5;  // The distance threshold for obstacle repulsion
+        // Calculate the discrete distance between rounded points
+        const deltaR = r2 - r1;
+        const deltaC = c2 - c1;
+        const steps = Math.max(Math.abs(deltaR), Math.abs(deltaC));
 
-        // Create a deep copy of the path.
-        // We map the discrete integers to floats to allow the points to move
-        // smoothly between cell centers (sub-pixel precision).
-        let smoothed = path.map(p => [parseFloat(p[0]), parseFloat(p[1])]);
+        for (let s = 0; s <= steps; s++) {
+            // Linear interpolation between rounded endpoints
+            const t = steps === 0 ? 0 : s / steps;
+            const r = Math.round(r1 + deltaR * t);
+            const c = Math.round(c1 + deltaC * t);
 
-        for (let iter = 0; iter < iterations; iter++) {
-            // DYNAMIC ANCHORING:
-            // We loop from index 1 to length - 2.
-            // This explicitly 'pins' smoothed[0] (Dynamic Start) and
-            // smoothed[smoothed.length - 1] (Dynamic Goal), ensuring
-            // the trajectory never drifts away from the user-defined endpoints.
-            for (let i = 1; i < smoothed.length - 1; i++) {
-                let curr = smoothed[i];
-                let prev = smoothed[i - 1];
-                let next = smoothed[i + 1];
-
-                // --- 1. INTERNAL TENSION FORCE (Smoothing) ---
-                // This calculates the gradient toward the midpoint of the neighbors.
-                // It removes the "stair-step" blockiness of the grid.
-                let smoothForceR = (prev[0] + next[0]) / 2 - curr[0];
-                let smoothForceC = (prev[1] + next[1]) / 2 - curr[1];
-
-                // --- 2. EXTERNAL REPULSION FORCE (Obstacle Avoidance) ---
-                let repelForceR = 0;
-                let repelForceC = 0;
-
-                // Dynamically iterate through all obstacles currently on the board
-                for (let obs of obstacles) {
-                    let distR = curr[0] - obs[0];
-                    let distC = curr[1] - obs[1];
-                    let distanceSq = distR * distR + distC * distC;
-                    let distance = Math.sqrt(distanceSq);
-
-                    // Only apply force if the point is within the influence radius of the obstacle
-                    if (distance < repulsionRadius && distance > 0) {
-                        // Force magnitude is inversely proportional to distance (1/d^3)
-                        // This creates a "hard" push-back as the path gets closer to a wall.
-                        let strength = repulsionWeight / (distanceSq * distance);
-                        repelForceR += distR * strength;
-                        repelForceC += distC * strength;
+            // Only paint if we've actually moved to a new cell (prevents redundant painting)
+            if (r !== lastR || c !== lastC) {
+                if (r >= 0 && r < rows && c >= 0 && c < columns) {
+                    const cell = container.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+                    if (cell && !cell.classList.contains("obstacle") && !cell.classList.contains("start") && !cell.classList.contains("goal")) {
+                        board[r][c] = "path";
+                        cell.classList.add("path");
                     }
                 }
-
-                // --- 3. GRADIENT DESCENT UPDATE ---
-                // We update the coordinates by moving them in the direction of the combined forces.
-                curr[0] += learningRate * (smoothnessWeight * smoothForceR + repelForceR);
-                curr[1] += learningRate * (smoothnessWeight * smoothForceC + repelForceC);
+                lastR = r;
+                lastC = c;
             }
         }
-
-        return smoothed;
     }
 }

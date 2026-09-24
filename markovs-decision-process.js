@@ -377,25 +377,158 @@ function logSumExpQValues(qValues, tau = 0.1) {
     return qMax + tau * Math.log(sumExp);
 }
 
-// !!!
-/**
- * Calculates the Soft Bellman state update across all available actions.
- * Drop-in alternative to hard-max calculateNextMoves.
- *
- * @param {number[]} qValues - Array of Q-values for each action.
- * @param {boolean} useSoftBellman - Toggle between hard Bellman and Soft Bellman.
- * @param {number} tau - Temperature parameter for Soft Bellman.
- * @returns {number} New state value V(s).
- */
-function computeSoftBellmanUpdate(qValues, useSoftBellman = true, tau = 0.15) {
-    if (!useSoftBellman) {
-        // Standard Hard Bellman Optimality Operator: V(s) = max_a Q(s, a)
-        return Math.max(...qValues);
+function converges(prev, curr, converge_factor = 0.01) {
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < columns; j++) {
+            if (Math.abs(prev[i][j] - curr[i][j]) > converge_factor) {
+                return false; // if the difference is larger than the convergence threshold, matrices have not converged
+            }
+        }
     }
-
-    // Soft Bellman Optimality Operator: V_soft(s) = tau * log(sum(exp(Q(s,a) / tau)))
-    return logSumExpQValues(qValues, tau);
+    return true; // if all the differences are within the threshold, they converged
 }
+
+
+/* Scan the entire state space S and classify each cell: reconstruct the sets {s_start}, {s_goal}, S_obs from the
+current board configuration. The user may have moved start/ goal or added obstacles since the last computation. */
+function mapHazardPositions() {
+    rivals = [];
+    // startNode = null; goalNode = null;
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < columns; j++) {
+            if (board[i][j] === "start") {
+                startNode = [i, j]; // store the start position
+            }
+            if (board[i][j] === "goal") {
+                goalNode = [i, j]; // store the goal position
+            }
+            if (board[i][j] === "obstacle") {
+                rivals.push([i, j]); // add an obstacle to the array
+            }
+        }
+    }
+}
+
+/* UI state locking: when the path is generated, parameters are locked to prevent the user from changing mdp definition
+while the solution is being displayed, ensuring consistency between policy being displayed and the parameters that generated it */
+function toggleButtons() {
+    // REMOVED "four-directions" and "eight-directions" from this list
+    //const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "four-directions", "eight-directions", "toggleGradient"];
+    const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "toggleGradient"];
+    ids.forEach(id => { // disabling/enabling buttons depending on if
+        const element = document.getElementById(id);
+        if (element) {
+            element.disabled = !element.disabled;
+            if (element.disabled && element.classList.contains("active")) {
+                element.classList.remove("active");
+            }
+        }
+    }    );
+    selectMode(""); // un-selecting the last selected mode after generating a path
+}
+
+
+function toggleGrid() {
+    const toggleButton = document.getElementById("toggleGrid");
+    toggleButton.classList.toggle("active"); // button appearance on toggle
+
+    const gridContainer = document.querySelector(".grid-container");
+    gridContainer.classList.toggle("no-border"); // grid visibility
+}
+
+function compressMatrixTo255(matrix) { // linear compression algorithm for turning the negative values instead to values 0-255
+    const flat = matrix.flat();
+    const min = Math.min(...flat);
+    const max = Math.max(...flat);
+
+    if (min === max) return matrix.map(row => row.map(() => 128)); // 128 cause it looked better than 255, 255 was too light
+
+    return matrix.map(row =>
+        row.map(value => {
+            // normalize 0–1;
+            // apply a min max affine transformation that collapses the dynamic range of the value function
+            // into the unit interval
+            let norm = (value - min) / (max - min);
+            // gamma correction power law contrast: the greater the coefficient the more emphasized the difference,
+            // and vice versa for values under 1.
+            // apply contrast custom, so it can work nice with big boards and small ones :D
+            norm = Math.pow(norm, contrast);
+            // quantize: scale to 8 bit grayscale
+            // scale to 0–255
+            return Math.round(norm * 255);
+        })
+    );
+}
+
+/* The gradient toggle overlays the value function onto the grid. High-utility states (close to the goal) appear bright,
+*  while low-utility states (near obstacles or far from the goal) appear dark. This provides an intuitive heatmap of the
+*  "desirability" of each state under the optimal policy. */
+function toggleGradient() {
+
+    const btn_togglePath = document.getElementById("togglePath");
+    if (!btn_togglePath.classList.contains("active")) return;
+
+    const toggledGradient = document.getElementById("toggleGradient");
+    const gridContainer = document.querySelector(".grid-container");
+
+    toggledGradient.classList.toggle("active"); // toggle the active class for the button
+
+    if (!values || values.length === 0) return;
+
+    // compress values only when turning gradient on
+    if (!gradientActive) lastCompressedValues = compressMatrixTo255(values);
+
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < columns; j++) {
+
+            const cell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
+            if (!cell) continue;
+
+            if (!cell.dataset.originalBg) { // store original background
+                cell.dataset.originalBg = window.getComputedStyle(cell).backgroundColor;
+            }
+
+            const preservedClasses = new Set(["start", "goal", "obstacle", "path"]);
+
+            if (!gradientActive) {
+                // apply gradient only to empty cells
+                if (![...preservedClasses].some(cls => cell.classList.contains(cls))) {
+                    const value = lastCompressedValues[i][j];
+                    cell.style.backgroundColor = `rgb(${value}, ${value}, ${value})`;
+                }
+            } else {
+                // restore original background
+                if (![...preservedClasses].some(cls => cell.classList.contains(cls))) {
+                    cell.style.backgroundColor = ""; // let other functions take control
+                }
+            }
+        }
+    }
+    gradientActive = !gradientActive;
+}
+
+function clearBoard() {
+
+    const generatedPath = document.getElementById("togglePath");
+    if (generatedPath.classList.contains("active")) togglePath(); // if path is toggled when clearing, we turn it off
+    board = new Array(rows).fill(0).map(() => new Array(columns).fill("empty")); // regenerating the map
+    rivals = []; // resetting rivals array
+    setup();   // update UI
+}
+
+/* Deep independent copy of the value function matrix V_k(s); used to save the state before a sweep (prev) for a convergence test */
+function copyValues(values){
+    let new_values = [];
+    for (let i = 0; i < rows; i++) {
+        new_values[i] = [];
+        for (let j = 0; j < columns; j++) {
+            new_values[i][j] = values[i][j];
+        }
+    }
+    return new_values; // return the newly created copy of the matrix
+}
+
+
 
 /* The core solver is given in the planPath and computePolicies functions */
 function planPath() {
@@ -557,9 +690,7 @@ function computePoliciesPreAccel(values, policies) {
                 // this condition ensures that the Bellman update is only applied to non-terminal states: skipping end goal and all obstacles/rivals;
                 // S_absorbing === S_goal + S_obstacle
                 if ((currPosn[0] !== goalNode[0] || currPosn[1] !== goalNode[1]) && !rivals.some((pos) => currPosn[0] === pos[0] && currPosn[1] === pos[1])) {
-                    calculateNextMoves(currPosn, values, policies, true);// true for updateInPlaceAddedParameter
-                    // implementation without added param is deprecated
-                    //calculateNextMoves(currPosn, values, policies); // calculate the best move, and update utility for cell
+                    calculateNextMoves(currPosn, values, policies, true);
                 }
             }
         }
@@ -575,17 +706,165 @@ function computePoliciesPreAccel(values, policies) {
     //return values[startNode[0]][startNode[1]]; // returns utility values at the start position
 }
 
+// !!!
+/* Path display using Gradient Descent */
+function showSmoothedPath(policies) {
+    // clear the previous path visualization
+    const gridContainer = document.querySelector(".grid-container");
 
-function converges(prev, curr, converge_factor = 0.01) {
     for (let i = 0; i < rows; i++) {
         for (let j = 0; j < columns; j++) {
-            if (Math.abs(prev[i][j] - curr[i][j]) > converge_factor) {
-                return false; // if the difference is larger than the convergence threshold, matrices have not converged
+            if (board[i][j] === "path") {
+                board[i][j] = "empty";  // clear all existing paths
+                // remove CSS class
+                const oldCell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
+                if (oldCell) oldCell.classList.remove("path");
             }
         }
     }
-    return true; // if all the differences are within the threshold, they converged
+
+    /*
+       CRITICAL DIFFERENCE FROM showPath(): showPath() colors cells in real-time as it walks the policy.
+       To apply Gradient Descent, we cannot draw immediately. We must follow a "Collect -> Smooth -> Draw" pipeline.
+       First, we collect all coordinates of the optimal discrete path into an array.
+    */
+    let pathCoords = [];
+    let currRow = startNode[0], currCol = startNode[1]; // start tracing path
+    let steps = 0;
+
+    // Store the starting position
+    pathCoords.push([currRow, currCol]);
+
+    while (policies[currRow] && policies[currRow][currCol] !== 0 && steps < rows * columns) {
+        steps++; // safety measure to stop & not go overboard
+        switch (policies[currRow][currCol]) {  // move to the next cell based on the policy
+            case 1: // move right
+                currCol++;
+                break;
+            case 2: // move up
+                currRow--;
+                break;
+            case 3: // move left
+                currCol--;
+                break;
+            case 4: // move down
+                currRow++;
+                break;
+            case 5: // move south-west
+                currRow++; currCol--;
+                break;
+            case 6: // move south-east
+                currRow++; currCol++;
+                break;
+            case 7: // move north-west
+                currRow--; currCol--;
+                break;
+            case 8: // move north-east
+                currRow--; currCol++;
+                break;
+            default: // invalid policy
+                return null;
+        }
+        // Instead of coloring the cell now, we save the coordinate to the list
+        pathCoords.push([currRow, currCol]);
+    }
+
+    /*
+       SMOOTHING STEP: Now that we have the complete discrete path, we pass it to the PathOptimizer. The Gradient Descent
+       logic will shift these points to remove "stair-stepping" while ensuring they don't collide with obstacles (rivals).
+    */
+    let smoothedPath = PathOptimizer.smoothPath(pathCoords, rivals);
+
+    renderGDPath(smoothedPath, gridContainer);
+
 }
+
+function renderGDPath(points, container) {
+    for (let i = 0; i < points.length - 1; i++) {
+        const p1 = points[i];
+        const p2 = points[i + 1];
+        // Interpolate between the two GD-optimized points to ensure no cells are skipped
+        for (let t = 0; t <= 1; t += 0.2) {
+            const r = Math.round(p1[0] + (p2[0] - p1[0]) * t);
+            const c = Math.round(p1[1] + (p2[1] - p1[1]) * t);
+            if (r >= 0 && r < rows && c >= 0 && c < columns) {
+                const cell = container.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+                if (cell && !cell.classList.contains("obstacle") && !cell.classList.contains("start") && !cell.classList.contains("goal")) {
+                    board[r][c] = "path";
+                    cell.classList.add("path");
+                }
+            }
+        }
+    }
+}
+
+/* Path display without Gradient Descent.
+* This is a policy rollout, i.e. a trajectory simulation. Starting from s = s_start , the sequence is generated by:
+* s_{t+1} = succ(s_t, π(s_t));
+* Loop terminates when: policy at the current state is 0 (which occurs at the goal and obstacles, what with them being
+* fixed), or once a safety counter "steps" exceeds rows * columns, preventing infinite loops if the policy contains a
+* cycle. Note that this traces the intended path under the optimal policy, not a stochastic sample. It visualizes the
+* deterministic plan that the agent intends to follow, even though the actual execution in the stochastic environment
+* would deviate with some probability.
+* */
+function showPath(policies) {
+    // clear the previous path visualization
+    const gridContainer = document.querySelector(".grid-container");
+
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < columns; j++) {
+            if (board[i][j] === "path") {
+                board[i][j] = "empty";  // clear all existing paths
+                // remove CSS class
+                const oldCell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
+                if (oldCell) oldCell.classList.remove("path");
+            }
+        }
+    }
+
+    let currRow = startNode[0], currCol = startNode[1]; // start tracing path
+    let steps = 0;
+
+    while (policies[currRow] && policies[currRow][currCol] !== 0 && steps < rows*columns) {
+        steps++; // safety measure to stop & not go overboard
+        switch (policies[currRow][currCol]) {  // move to the next cell based on the policy
+            case 1: // move right
+                currCol++;
+                break;
+            case 2: // move up
+                currRow--;
+                break;
+            case 3: // move left
+                currCol--;
+                break;
+            case 4: // move down
+                currRow++;
+                break;
+            case 5: // move south-west
+                currRow++; currCol--;
+                break;
+            case 6: // move south-east
+                currRow++; currCol++;
+                break;
+            case 7: // move north-west
+                currRow--; currCol--;
+                break;
+            case 8: // move north-east
+                currRow--; currCol++;
+                break;
+            default: // invalid policy
+                return null;
+        }
+        const selector = `.cell[data-row="${currRow}"][data-col="${currCol}"]`;
+        const cell = gridContainer.querySelector(selector);
+
+        if (cell && !cell.classList.contains("obstacle") && !cell.classList.contains("start") && !cell.classList.contains("goal")) {
+            board[currRow][currCol] = "path";
+            cell.classList.add("path"); // add the "path" class to the current cell
+        }
+    }
+}
+
 
 // !!!
 /* Implementation of the Bellman optimality update for a single state s=(i,j) */
@@ -596,8 +875,10 @@ function converges(prev, curr, converge_factor = 0.01) {
  for the whole board based on the old values before updating anything. If we update in-place, the acceleration fails.
  To fix this without duplicating your code, we only need to make one change to the existing calculateNextMoves to
  make it flexible, and then update computePolicies. The non-redundant minimal way to do this is given here. */
-function calculateNextMoves(currPosn, values, policies, updateInPlace = true) {
-
+function calculateNextMoves(currPosn, values, policies, updateInPlace) {
+    // original implementation to compare against didn't have soft Bellman and updated in place and didn't have a Jacobi update
+    // reduce dimensions xD
+    let useSoftBellman = !updateInPlace; // not true in general, true in relation to comparable optimization from quoted src
     // assume all neighboring positions are in range
     // immediately set, then reset if needed
     let s_range = true;
@@ -719,7 +1000,8 @@ function calculateNextMoves(currPosn, values, policies, updateInPlace = true) {
         // (which makes the gradient smoother and helps convergence), but we still want to extract the strict highest
         // Q-value to define the deterministic Policy so your showPath visualizer doesn't break.
         // Soft update for the value landscape (calculating V_new(s))
-        let new_val = computeSoftBellmanUpdate(moves, true, 0.15);
+
+        let new_val = computeSoftBellmanUpdate(moves, useSoftBellman, 0.15);
 
         // Hard argmax for the deterministic policy trajectory visualization
         let best_q = Math.max(...moves);
@@ -732,7 +1014,7 @@ function calculateNextMoves(currPosn, values, policies, updateInPlace = true) {
         // Wrapped update in 'if (updateInPlace)' block.
         // This prevents modifying the 'values' matrix when we only need to compute a result for a snapshot.
         if (updateInPlace) {
-            values[currPosn[0]][currPosn[1]] = new_val; // assign soft utility to current cell
+            values[currPosn[0]][currPosn[1]] = new_val; // assign utility to current cell
             policies[currPosn[0]][currPosn[1]] = max_move + 1; // store best deterministic move
         }
 
@@ -745,7 +1027,7 @@ function calculateNextMoves(currPosn, values, policies, updateInPlace = true) {
         let moves = [e, n, w, s, sw, se, nw, ne];
 
         // Soft update for the value landscape (calculating V_new(s))
-        let new_val = computeSoftBellmanUpdate(moves, true, 0.15);
+        let new_val = computeSoftBellmanUpdate(moves, useSoftBellman, 0.15);
 
         // Hard argmax for the deterministic policy trajectory visualization
         let best_q = Math.max(...moves);
@@ -767,300 +1049,24 @@ function calculateNextMoves(currPosn, values, policies, updateInPlace = true) {
     }
 }
 
-/* Scan the entire state space S and classify each cell: reconstruct the sets {s_start}, {s_goal}, S_obs from the
-current board configuration. The user may have moved start/ goal or added obstacles since the last computation. */
-function mapHazardPositions() {
-    rivals = [];
-    // startNode = null; goalNode = null;
-    for (let i = 0; i < rows; i++) {
-        for (let j = 0; j < columns; j++) {
-            if (board[i][j] === "start") {
-                startNode = [i, j]; // store the start position
-            }
-            if (board[i][j] === "goal") {
-                goalNode = [i, j]; // store the goal position
-            }
-            if (board[i][j] === "obstacle") {
-                rivals.push([i, j]); // add an obstacle to the array
-            }
-        }
-    }
-}
-
-/* UI state locking: when the path is generated, parameters are locked to prevent the user from changing mdp definition
-while the solution is being displayed, ensuring consistency between policy being displayed and the parameters that generated it */
-function toggleButtons() {
-    // REMOVED "four-directions" and "eight-directions" from this list
-    //const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "four-directions", "eight-directions", "toggleGradient"];
-    const ids = ["powerCost", "repairCost", "deliveryReward", "discount", "contrast", "wall", "start_btn", "goal_btn", "toggleGradient"];
-    ids.forEach(id => { // disabling/enabling buttons depending on if
-        const element = document.getElementById(id);
-        if (element) {
-            element.disabled = !element.disabled;
-            if (element.disabled && element.classList.contains("active")) {
-                element.classList.remove("active");
-            }
-        }
-    }    );
-    selectMode(""); // un-selecting the last selected mode after generating a path
-}
-
 // !!!
-/* Path display using Gradient Descent */
-function showSmoothedPath(policies) {
-    // clear the previous path visualization
-    const gridContainer = document.querySelector(".grid-container");
-
-    for (let i = 0; i < rows; i++) {
-        for (let j = 0; j < columns; j++) {
-            if (board[i][j] === "path") {
-                board[i][j] = "empty";  // clear all existing paths
-                // remove CSS class
-                const oldCell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
-                if (oldCell) oldCell.classList.remove("path");
-            }
-        }
+/**
+ * Calculates the Soft Bellman state update across all available actions.
+ * Drop-in alternative to hard-max calculateNextMoves.
+ *
+ * @param {number[]} qValues - Array of Q-values for each action.
+ * @param {boolean} useSoftBellman - Toggle between hard Bellman and Soft Bellman.
+ * @param {number} tau - Temperature parameter for Soft Bellman.
+ * @returns {number} New state value V(s).
+ */
+function computeSoftBellmanUpdate(qValues, useSoftBellman, tau = 0.15) {
+    if (!useSoftBellman) {
+        // Standard Hard Bellman Optimality Operator: V(s) = max_a Q(s, a)
+        return Math.max(...qValues);
     }
 
-    /*
-       CRITICAL DIFFERENCE FROM showPath(): showPath() colors cells in real-time as it walks the policy.
-       To apply Gradient Descent, we cannot draw immediately. We must follow a "Collect -> Smooth -> Draw" pipeline.
-       First, we collect all coordinates of the optimal discrete path into an array.
-    */
-    let pathCoords = [];
-    let currRow = startNode[0], currCol = startNode[1]; // start tracing path
-    let steps = 0;
-
-    // Store the starting position
-    pathCoords.push([currRow, currCol]);
-
-    while (policies[currRow] && policies[currRow][currCol] !== 0 && steps < rows * columns) {
-        steps++; // safety measure to stop & not go overboard
-        switch (policies[currRow][currCol]) {  // move to the next cell based on the policy
-            case 1: // move right
-                currCol++;
-                break;
-            case 2: // move up
-                currRow--;
-                break;
-            case 3: // move left
-                currCol--;
-                break;
-            case 4: // move down
-                currRow++;
-                break;
-            case 5: // move south-west
-                currRow++; currCol--;
-                break;
-            case 6: // move south-east
-                currRow++; currCol++;
-                break;
-            case 7: // move north-west
-                currRow--; currCol--;
-                break;
-            case 8: // move north-east
-                currRow--; currCol++;
-                break;
-            default: // invalid policy
-                return null;
-        }
-        // Instead of coloring the cell now, we save the coordinate to the list
-        pathCoords.push([currRow, currCol]);
-    }
-
-    /*
-       SMOOTHING STEP: Now that we have the complete discrete path, we pass it to the PathOptimizer. The Gradient Descent
-       logic will shift these points to remove "stair-stepping" while ensuring they don't collide with obstacles (rivals).
-    */
-    let smoothedPath = PathOptimizer.smoothPath(pathCoords, rivals);
-
-    /*
-       FINAL RENDERING: We now iterate through the smoothed floating-point coordinates. We use Math.round() to find
-        the nearest discrete cell to color on the grid.
-    */
-    smoothedPath.forEach(([r, c]) => {
-        let row = Math.round(r);
-        let col = Math.round(c);
-
-        // Ensure the smoothed point is still within the grid boundaries
-        if (row >= 0 && row < rows && col >= 0 && col < columns) {
-            const selector = `.cell[data-row="${row}"][data-col="${col}"]`;
-            const cell = gridContainer.querySelector(selector);
-
-            if (cell && !cell.classList.contains("obstacle") && !cell.classList.contains("start") && !cell.classList.contains("goal")) {
-                board[row][col] = "path";
-                cell.classList.add("path"); // add the "path" class to the current cell
-            }
-        }
-    });
-}
-
-
-/* Path display without Gradient Descent, deprecated.
-* This is a policy rollout, i.e. a trajectory simulation. Starting from s = s_start , the sequence is generated by:
-* s_{t+1} = succ(s_t, π(s_t));
-* Loop terminates when: policy at the current state is 0 (which occurs at the goal and obstacles, what with them being
-* fixed), or once a safety counter "steps" exceeds rows * columns, preventing infinite loops if the policy contains a
-* cycle. Note that this traces the intended path under the optimal policy, not a stochastic sample. It visualizes the
-* deterministic plan that the agent intends to follow, even though the actual execution in the stochastic environment
-* would deviate with some probability.
-* */
-function showPath(policies) {
-    // clear the previous path visualization
-    const gridContainer = document.querySelector(".grid-container");
-
-    for (let i = 0; i < rows; i++) {
-        for (let j = 0; j < columns; j++) {
-            if (board[i][j] === "path") {
-                board[i][j] = "empty";  // clear all existing paths
-                // remove CSS class
-                const oldCell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
-                if (oldCell) oldCell.classList.remove("path");
-            }
-        }
-    }
-
-    let currRow = startNode[0], currCol = startNode[1]; // start tracing path
-    let steps = 0;
-
-    while (policies[currRow] && policies[currRow][currCol] !== 0 && steps < rows*columns) {
-        steps++; // safety measure to stop & not go overboard
-        switch (policies[currRow][currCol]) {  // move to the next cell based on the policy
-            case 1: // move right
-                currCol++;
-                break;
-            case 2: // move up
-                currRow--;
-                break;
-            case 3: // move left
-                currCol--;
-                break;
-            case 4: // move down
-                currRow++;
-                break;
-            case 5: // move south-west
-                currRow++; currCol--;
-                break;
-            case 6: // move south-east
-                currRow++; currCol++;
-                break;
-            case 7: // move north-west
-                currRow--; currCol--;
-                break;
-            case 8: // move north-east
-                currRow--; currCol++;
-                break;
-            default: // invalid policy
-                return null;
-        }
-        const selector = `.cell[data-row="${currRow}"][data-col="${currCol}"]`;
-        const cell = gridContainer.querySelector(selector);
-
-        if (cell && !cell.classList.contains("obstacle") && !cell.classList.contains("start") && !cell.classList.contains("goal")) {
-            board[currRow][currCol] = "path";
-            cell.classList.add("path"); // add the "path" class to the current cell
-        }
-    }
-}
-
-function toggleGrid() {
-    const toggleButton = document.getElementById("toggleGrid");
-    toggleButton.classList.toggle("active"); // button appearance on toggle
-
-    const gridContainer = document.querySelector(".grid-container");
-    gridContainer.classList.toggle("no-border"); // grid visibility
-}
-
-function compressMatrixTo255(matrix) { // linear compression algorithm for turning the negative values instead to values 0-255
-    const flat = matrix.flat();
-    const min = Math.min(...flat);
-    const max = Math.max(...flat);
-
-    if (min === max) return matrix.map(row => row.map(() => 128)); // 128 cause it looked better than 255, 255 was too light
-
-    return matrix.map(row =>
-        row.map(value => {
-            // normalize 0–1;
-            // apply a min max affine transformation that collapses the dynamic range of the value function
-            // into the unit interval
-            let norm = (value - min) / (max - min);
-            // gamma correction power law contrast: the greater the coefficient the more emphasized the difference,
-            // and vice versa for values under 1.
-            // apply contrast custom, so it can work nice with big boards and small ones :D
-            norm = Math.pow(norm, contrast);
-            // quantize: scale to 8 bit grayscale
-            // scale to 0–255
-            return Math.round(norm * 255);
-        })
-    );
-}
-
-/* The gradient toggle overlays the value function onto the grid. High-utility states (close to the goal) appear bright,
-*  while low-utility states (near obstacles or far from the goal) appear dark. This provides an intuitive heatmap of the
-*  "desirability" of each state under the optimal policy. */
-function toggleGradient() {
-
-    const btn_togglePath = document.getElementById("togglePath");
-    if (!btn_togglePath.classList.contains("active")) return;
-
-    const toggledGradient = document.getElementById("toggleGradient");
-    const gridContainer = document.querySelector(".grid-container");
-
-    toggledGradient.classList.toggle("active"); // toggle the active class for the button
-
-    if (!values || values.length === 0) return;
-
-    // compress values only when turning gradient on
-    if (!gradientActive) lastCompressedValues = compressMatrixTo255(values);
-
-    for (let i = 0; i < rows; i++) {
-        for (let j = 0; j < columns; j++) {
-
-            const cell = gridContainer.querySelector(`.cell[data-row="${i}"][data-col="${j}"]`);
-            if (!cell) continue;
-
-            if (!cell.dataset.originalBg) { // store original background
-                cell.dataset.originalBg = window.getComputedStyle(cell).backgroundColor;
-            }
-
-            const preservedClasses = new Set(["start", "goal", "obstacle", "path"]);
-
-            if (!gradientActive) {
-                // apply gradient only to empty cells
-                if (![...preservedClasses].some(cls => cell.classList.contains(cls))) {
-                    const value = lastCompressedValues[i][j];
-                    cell.style.backgroundColor = `rgb(${value}, ${value}, ${value})`;
-                }
-            } else {
-                // restore original background
-                if (![...preservedClasses].some(cls => cell.classList.contains(cls))) {
-                    cell.style.backgroundColor = ""; // let other functions take control
-                }
-            }
-        }
-    }
-    gradientActive = !gradientActive;
-}
-
-function clearBoard() {
-
-    const generatedPath = document.getElementById("togglePath");
-    if (generatedPath.classList.contains("active")) togglePath(); // if path is toggled when clearing, we turn it off
-    board = new Array(rows).fill(0).map(() => new Array(columns).fill("empty")); // regenerating the map
-    rivals = []; // resetting rivals array
-    setup();   // update UI
-}
-
-/* Deep independent copy of the value function matrix V_k(s); used to save the state before a sweep (prev) for a convergence test */
-function copyValues(values){
-    let new_values = [];
-    for (let i = 0; i < rows; i++) {
-        new_values[i] = [];
-        for (let j = 0; j < columns; j++) {
-            new_values[i][j] = values[i][j];
-        }
-    }
-    return new_values; // return the newly created copy of the matrix
+    // Soft Bellman Optimality Operator: V_soft(s) = tau * log(sum(exp(Q(s,a) / tau)))
+    return logSumExpQValues(qValues, tau);
 }
 
 // =============================================================================
